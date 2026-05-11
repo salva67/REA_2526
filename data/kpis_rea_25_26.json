@@ -1,0 +1,20 @@
+{
+  "fecha_generacion": "2026-05-11 13:13:01 -03",
+  "fuente_archivo": "Copia de REA 25-26 v2.xlsx",
+  "fuente_solapa": "25-26",
+  "fuente_columnas": "A:M",
+  "registros": 210,
+  "provincias": 5,
+  "departamentos": 69,
+  "cultivos": 6,
+  "has_total": 167051.66,
+  "suma_asegurada_usd": 64906580.52736248,
+  "prima_usd": 2132684.268049672,
+  "siniestros_total_usd": 736413.1269466764,
+  "resultado_tecnico_usd": 1396271.1411029953,
+  "tasa_prima_pct": 0.032857751105076355,
+  "loss_cost_campania_pct": 0.011345739075504506,
+  "loss_ratio_pct": 0.34529871016497077,
+  "provincia_mayor_exposicion": "BUENOS AIRES",
+  "cultivo_mayor_loss_ratio": "FINA OTROS"
+}
