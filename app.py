@@ -1,738 +1,738 @@
+
 from __future__ import annotations
 
+import io
+import re
+import unicodedata
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "data" / "rea_25_26_dashboard_ready.csv"
+HIST_LOCAL_PATH = BASE_DIR / "data" / "historico" / "pricing_vs_excel.csv"
+HIST_RAW_URL = "https://raw.githubusercontent.com/salva67/tarifador-ML/main/data/raw/pricing_vs_excel.csv"
+
 
 st.set_page_config(
-    page_title="REA 25-26 | Dashboard de Negocio",
+    page_title="Dashboard REA 25-26",
     page_icon="🌾",
     layout="wide",
     initial_sidebar_state="expanded",
-)
-
-# -----------------------------
-# Estilo visual
-# -----------------------------
-st.markdown(
-    """
-    <style>
-    .main .block-container {padding-top: 1.4rem; padding-bottom: 2rem;}
-    .metric-card {
-        border: 1px solid #E7E7E7;
-        border-radius: 18px;
-        padding: 18px 18px 14px 18px;
-        background: linear-gradient(180deg, #FFFFFF 0%, #FAFAFA 100%);
-        box-shadow: 0 2px 10px rgba(0,0,0,.035);
-        min-height: 112px;
-    }
-    .metric-label {font-size: 0.82rem; color: #606060; margin-bottom: 0.35rem;}
-    .metric-value {font-size: 1.7rem; font-weight: 760; color: #1E1E1E; line-height: 1.1;}
-    .metric-help {font-size: 0.78rem; color: #777; margin-top: 0.35rem;}
-    .insight-box {
-        border-left: 5px solid #B88746;
-        background: #FFF8EF;
-        padding: 14px 16px;
-        border-radius: 12px;
-        margin: 8px 0 12px 0;
-        color: #343434;
-    }
-    .section-title {font-size: 1.15rem; font-weight: 700; margin: 0.6rem 0 0.35rem 0;}
-    div[data-testid="stDataFrame"] {border-radius: 12px; overflow: hidden;}
-    </style>
-    """,
-    unsafe_allow_html=True,
 )
 
 
 # -----------------------------
 # Helpers
 # -----------------------------
-@st.cache_data(show_spinner=False)
-def load_data(path: Path = DATA_PATH) -> pd.DataFrame:
-    df = pd.read_csv(path)
-
-    text_cols = [
-        "cosecha",
-        "cobertura",
-        "cultivo",
-        "provincia",
-        "departamento",
-        "semaforo_loss_ratio",
-        "cluster_negocio",
-    ]
-    for c in text_cols:
-        if c in df.columns:
-            df[c] = df[c].fillna("SIN DATO").astype(str).str.strip().str.upper()
-
-    num_cols = [
-        "has",
-        "suma_asegurada_usd",
-        "suma_asegurada_helada_usd",
-        "prima_usd",
-        "st_pagado_usd",
-        "rsp_usd",
-        "hyg_usd",
-        "siniestros_total_usd",
-        "resultado_tecnico_usd",
-        "tasa_prima_pct",
-        "loss_cost_campania_pct",
-        "loss_ratio_pct",
-        "prima_por_ha_usd",
-        "suma_asegurada_por_ha_usd",
-        "siniestros_por_ha_usd",
-        "share_suma_asegurada_pct",
-    ]
-    for c in num_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-
-    # Recalculo defensivo para que los indicadores siempre respondan a filtros.
-    df["siniestros_total_usd"] = df[["st_pagado_usd", "rsp_usd", "hyg_usd"]].sum(axis=1)
-    df["resultado_tecnico_usd"] = df["prima_usd"] - df["siniestros_total_usd"]
-    df["siniestro_flag"] = df["siniestros_total_usd"] > 0
-    return df
+def normalize_label(value) -> str:
+    if pd.isna(value):
+        return ""
+    s = str(value).strip().upper()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("utf-8")
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
-def fmt_usd(value: float) -> str:
-    value = 0 if pd.isna(value) else float(value)
-    abs_v = abs(value)
-    sign = "-" if value < 0 else ""
-    if abs_v >= 1_000_000:
-        return f"{sign}USD {abs_v/1_000_000:,.1f} M"
-    if abs_v >= 1_000:
-        return f"{sign}USD {abs_v/1_000:,.0f} K"
-    return f"{sign}USD {abs_v:,.0f}"
+def normalize_key(value) -> str:
+    s = normalize_label(value)
+    return re.sub(r"[^A-Z0-9]+", "", s)
 
 
-def fmt_num(value: float, decimals: int = 0) -> str:
+def safe_div(num, den):
+    return np.where(den != 0, num / den, np.nan)
+
+
+def fmt_money(value, decimals=0):
     if pd.isna(value):
         return "-"
-    return f"{float(value):,.{decimals}f}"
+    return f"USD {value:,.{decimals}f}"
 
 
-def fmt_pct(value: float, decimals: int = 1) -> str:
+def fmt_pct(value, decimals=1):
     if pd.isna(value):
         return "-"
-    return f"{float(value) * 100:.{decimals}f}%"
+    return f"{value:.{decimals}%}"
 
 
-def safe_ratio(num: float, den: float) -> float:
-    den = float(den or 0)
-    if den == 0:
-        return 0.0
-    return float(num) / den
-
-
-def kpis(df: pd.DataFrame) -> dict[str, float]:
-    suma = df["suma_asegurada_usd"].sum()
-    prima = df["prima_usd"].sum()
-    siniestros = df["siniestros_total_usd"].sum()
-    has = df["has"].sum()
-    return {
-        "registros": len(df),
-        "provincias": df["provincia"].nunique(),
-        "departamentos": df["departamento"].nunique(),
-        "cultivos": df["cultivo"].nunique(),
-        "has": has,
-        "suma_asegurada_usd": suma,
-        "prima_usd": prima,
-        "siniestros_total_usd": siniestros,
-        "resultado_tecnico_usd": prima - siniestros,
-        "tasa_prima": safe_ratio(prima, suma),
-        "loss_cost": safe_ratio(siniestros, suma),
-        "loss_ratio": safe_ratio(siniestros, prima),
-        "prima_por_ha": safe_ratio(prima, has),
-        "siniestros_por_ha": safe_ratio(siniestros, has),
-    }
-
-
-def aggregate(df: pd.DataFrame, by: Iterable[str]) -> pd.DataFrame:
-    by = list(by)
-    if not by:
-        raise ValueError("Debe indicarse al menos una dimensión de agrupación")
-
-    out = (
-        df.groupby(by, dropna=False, as_index=False)
-        .agg(
-            registros=("registro_id", "count"),
-            hectareas=("has", "sum"),
-            suma_asegurada_usd=("suma_asegurada_usd", "sum"),
-            suma_asegurada_helada_usd=("suma_asegurada_helada_usd", "sum"),
-            prima_usd=("prima_usd", "sum"),
-            st_pagado_usd=("st_pagado_usd", "sum"),
-            rsp_usd=("rsp_usd", "sum"),
-            hyg_usd=("hyg_usd", "sum"),
-            siniestros_total_usd=("siniestros_total_usd", "sum"),
-            casos_con_siniestro=("siniestro_flag", "sum"),
-        )
-        .sort_values("suma_asegurada_usd", ascending=False)
+def add_css():
+    st.markdown(
+        """
+        <style>
+        .main .block-container {padding-top: 1.5rem;}
+        .metric-card {
+            padding: 16px 18px;
+            border-radius: 18px;
+            background: #FFFFFF;
+            box-shadow: 0 1px 12px rgba(15, 23, 42, 0.08);
+            border: 1px solid #E5E7EB;
+            min-height: 110px;
+        }
+        .metric-title {
+            color: #64748B;
+            font-size: 0.82rem;
+            font-weight: 600;
+            margin-bottom: 0.35rem;
+        }
+        .metric-value {
+            color: #0F172A;
+            font-size: 1.35rem;
+            font-weight: 800;
+            line-height: 1.2;
+        }
+        .metric-sub {
+            color: #64748B;
+            font-size: 0.78rem;
+            margin-top: 0.4rem;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 700;
+            margin-right: 6px;
+        }
+        .badge-red {background:#FEE2E2;color:#991B1B;}
+        .badge-yellow {background:#FEF3C7;color:#92400E;}
+        .badge-green {background:#DCFCE7;color:#166534;}
+        .badge-blue {background:#DBEAFE;color:#1E40AF;}
+        .section-note {
+            padding: 12px 14px;
+            border-left: 4px solid #2563EB;
+            background: #EFF6FF;
+            border-radius: 12px;
+            color:#1E3A8A;
+            margin-bottom: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    out["resultado_tecnico_usd"] = out["prima_usd"] - out["siniestros_total_usd"]
-    out["loss_ratio"] = np.where(out["prima_usd"] > 0, out["siniestros_total_usd"] / out["prima_usd"], 0.0)
-    out["loss_cost"] = np.where(out["suma_asegurada_usd"] > 0, out["siniestros_total_usd"] / out["suma_asegurada_usd"], 0.0)
-    out["tasa_prima"] = np.where(out["suma_asegurada_usd"] > 0, out["prima_usd"] / out["suma_asegurada_usd"], 0.0)
-    out["prima_por_ha"] = np.where(out["hectareas"] > 0, out["prima_usd"] / out["hectareas"], 0.0)
-    out["share_suma"] = out["suma_asegurada_usd"] / max(out["suma_asegurada_usd"].sum(), 1)
-    out["share_prima"] = out["prima_usd"] / max(out["prima_usd"].sum(), 1)
-    out["share_siniestros"] = out["siniestros_total_usd"] / max(out["siniestros_total_usd"].sum(), 1)
-    out["cum_share_suma"] = out["share_suma"].cumsum()
-    return out
 
 
-def metric_card(label: str, value: str, help_text: str = "") -> None:
+def metric_card(title, value, subtitle=""):
     st.markdown(
         f"""
         <div class="metric-card">
-            <div class="metric-label">{label}</div>
+            <div class="metric-title">{title}</div>
             <div class="metric-value">{value}</div>
-            <div class="metric-help">{help_text}</div>
+            <div class="metric-sub">{subtitle}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def add_bar_labels(fig: go.Figure) -> go.Figure:
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=45, b=10),
-        height=430,
-        legend_title_text="",
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-    )
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,.08)")
-    return fig
+@st.cache_data(show_spinner=False)
+def load_campaign() -> pd.DataFrame:
+    df = pd.read_csv(DATA_PATH)
+    for col in ["cosecha", "cobertura", "cultivo", "provincia", "departamento"]:
+        df[col] = df[col].map(normalize_label)
 
+    for col in ["cultivo", "provincia", "departamento"]:
+        df[f"{col}_key"] = df[col].map(normalize_key)
 
-def business_commentary(k: dict[str, float]) -> str:
-    lr = k["loss_ratio"]
-    resultado = k["resultado_tecnico_usd"]
-    if lr == 0:
-        status = "la cartera filtrada no registra siniestros cargados."
-    elif lr < 0.50:
-        status = "el resultado técnico luce favorable, con siniestralidad contenida frente a la prima."
-    elif lr < 0.80:
-        status = "la siniestralidad es relevante pero todavía se mantiene en un rango manejable."
-    elif lr < 1.00:
-        status = "la cartera se acerca a una zona de equilibrio técnico y conviene revisar focos puntuales."
-    else:
-        status = "la cartera presenta resultado técnico negativo y requiere análisis de causas por zona/cultivo."
-
-    return (
-        f"Con los filtros actuales, {status} "
-        f"El resultado técnico es {fmt_usd(resultado)} y el Loss Ratio agregado es {fmt_pct(lr)}."
-    )
-
-
-def style_table(df: pd.DataFrame) -> pd.DataFrame:
-    cols_order = [
-        c
-        for c in [
-            "provincia",
-            "departamento",
-            "cultivo",
-            "cosecha",
-            "cobertura",
-            "registros",
-            "hectareas",
-            "suma_asegurada_usd",
-            "prima_usd",
-            "siniestros_total_usd",
-            "resultado_tecnico_usd",
-            "loss_ratio",
-            "loss_cost",
-            "tasa_prima",
-            "share_suma",
-            "casos_con_siniestro",
-        ]
-        if c in df.columns
+    numeric_cols = [
+        "hectareas",
+        "suma_asegurada_usd",
+        "suma_asegurada_helada_usd",
+        "prima_usd",
+        "st_pagado_usd",
+        "rsp_usd",
+        "hyg_usd",
+        "siniestros_totales_usd",
+        "resultado_tecnico_usd",
+        "loss_ratio_campania",
+        "loss_cost_campania",
+        "tasa_prima",
+        "tasa_rea",
     ]
-    rest = [c for c in df.columns if c not in cols_order]
-    return df[cols_order + rest]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    return df
 
 
-def chart_metric_label(metric: str) -> str:
-    return {
-        "suma_asegurada_usd": "Suma asegurada",
-        "prima_usd": "Prima",
-        "siniestros_total_usd": "Siniestros",
-        "resultado_tecnico_usd": "Resultado técnico",
-        "loss_ratio": "Loss Ratio",
-        "loss_cost": "Loss Cost",
-        "tasa_prima": "Tasa de prima",
-        "hectareas": "Hectáreas",
-    }.get(metric, metric)
+@st.cache_data(show_spinner=False)
+def load_historical_from_csv(content: bytes | None, try_github: bool) -> pd.DataFrame | None:
+    try:
+        if content is not None:
+            hist = pd.read_csv(io.BytesIO(content))
+        elif HIST_LOCAL_PATH.exists():
+            hist = pd.read_csv(HIST_LOCAL_PATH)
+        elif try_github:
+            hist = pd.read_csv(HIST_RAW_URL)
+        else:
+            return None
+    except Exception:
+        return None
+
+    # Normaliza nombres mínimos esperados del tarifador.
+    rename = {c: c.strip() for c in hist.columns}
+    hist = hist.rename(columns=rename)
+
+    # Si viene con nombres en mayúsculas del repo.
+    colmap = {c.upper(): c for c in hist.columns}
+    for source, target in [("CULTIVO", "cultivo"), ("PROVINCIA", "provincia"), ("DEPTO", "departamento")]:
+        if source in colmap and target not in hist.columns:
+            hist = hist.rename(columns={colmap[source]: target})
+
+    needed = ["cultivo", "provincia", "departamento"]
+    if not all(c in hist.columns for c in needed):
+        return None
+
+    hist["cultivo_key"] = hist["cultivo"].map(normalize_key)
+    hist["provincia_key"] = hist["provincia"].map(normalize_key)
+    hist["departamento_key"] = hist["departamento"].map(normalize_key)
+
+    # Históricos esperados desde tarifador-ML.
+    for c in [
+        "loss_cost_hist",
+        "premium_rate_hist",
+        "exposure_hist_usd",
+        "premium_hist_usd",
+        "claims_hist_usd",
+        "technical_rate_final",
+        "technical_rate_with_cat",
+        "sufficiency_index",
+        "T_FINAL_EXCEL",
+        "LC_MEDIA_EXCEL",
+    ]:
+        if c in hist.columns:
+            hist[c] = pd.to_numeric(hist[c], errors="coerce")
+
+    if "loss_ratio_historico" not in hist.columns:
+        if {"claims_hist_usd", "premium_hist_usd"}.issubset(hist.columns):
+            hist["loss_ratio_historico"] = hist["claims_hist_usd"] / hist["premium_hist_usd"].replace(0, np.nan)
+        else:
+            hist["loss_ratio_historico"] = np.nan
+
+    # Loss cost histórico: prioriza loss_cost_hist; si no, LC_MEDIA_EXCEL.
+    if "loss_cost_historico" not in hist.columns:
+        if "loss_cost_hist" in hist.columns:
+            hist["loss_cost_historico"] = hist["loss_cost_hist"]
+        elif "LC_MEDIA_EXCEL" in hist.columns:
+            hist["loss_cost_historico"] = hist["LC_MEDIA_EXCEL"]
+        else:
+            hist["loss_cost_historico"] = np.nan
+
+    keep = [
+        "cultivo_key",
+        "provincia_key",
+        "departamento_key",
+        "loss_ratio_historico",
+        "loss_cost_historico",
+        "premium_rate_hist",
+        "technical_rate_final",
+        "technical_rate_with_cat",
+        "sufficiency_index",
+        "exposure_hist_usd",
+        "premium_hist_usd",
+        "claims_hist_usd",
+    ]
+    keep = [c for c in keep if c in hist.columns]
+    return hist[keep].drop_duplicates(["cultivo_key", "provincia_key", "departamento_key"])
+
+
+def add_historical(df: pd.DataFrame, hist: pd.DataFrame | None) -> pd.DataFrame:
+    out = df.copy()
+    if hist is None or hist.empty:
+        out["loss_ratio_historico"] = np.nan
+        out["loss_cost_historico"] = np.nan
+        out["gap_loss_ratio"] = np.nan
+        out["gap_loss_cost"] = np.nan
+        out["indice_loss_cost"] = np.nan
+        out["tiene_historico"] = False
+        return out
+
+    out = out.merge(
+        hist,
+        on=["cultivo_key", "provincia_key", "departamento_key"],
+        how="left",
+        suffixes=("", "_hist"),
+    )
+    out["gap_loss_ratio"] = out["loss_ratio_campania"] - out["loss_ratio_historico"]
+    out["gap_loss_cost"] = out["loss_cost_campania"] - out["loss_cost_historico"]
+    out["indice_loss_cost"] = out["loss_cost_campania"] / out["loss_cost_historico"].replace(0, np.nan)
+    out["tiene_historico"] = out["loss_cost_historico"].notna() | out["loss_ratio_historico"].notna()
+    return out
+
+
+def aggregate(df: pd.DataFrame, dims: list[str]) -> pd.DataFrame:
+    g = (
+        df.groupby(dims, dropna=False, as_index=False)
+        .agg(
+            registros=("cultivo", "size"),
+            hectareas=("hectareas", "sum"),
+            suma_asegurada_usd=("suma_asegurada_usd", "sum"),
+            prima_usd=("prima_usd", "sum"),
+            st_pagado_usd=("st_pagado_usd", "sum"),
+            rsp_usd=("rsp_usd", "sum"),
+            hyg_usd=("hyg_usd", "sum"),
+            siniestros_totales_usd=("siniestros_totales_usd", "sum"),
+        )
+    )
+    g["resultado_tecnico_usd"] = g["prima_usd"] - g["siniestros_totales_usd"]
+    g["loss_ratio_campania"] = g["siniestros_totales_usd"] / g["prima_usd"].replace(0, np.nan)
+    g["loss_cost_campania"] = g["siniestros_totales_usd"] / g["suma_asegurada_usd"].replace(0, np.nan)
+    g["tasa_prima"] = g["prima_usd"] / g["suma_asegurada_usd"].replace(0, np.nan)
+    g["participacion_suma"] = g["suma_asegurada_usd"] / g["suma_asegurada_usd"].sum()
+    g["participacion_prima"] = g["prima_usd"] / g["prima_usd"].sum()
+    return g
+
+
+def build_alerts(df: pd.DataFrame, concentration_threshold: float, lr_tolerance: float, lc_tolerance: float) -> pd.DataFrame:
+    work = df.copy()
+    total_expo = work["suma_asegurada_usd"].sum()
+    work["participacion_suma"] = work["suma_asegurada_usd"] / total_expo if total_expo else 0
+
+    alert_rows = []
+    for _, r in work.iterrows():
+        labels = []
+        severity = 0
+
+        if r["participacion_suma"] >= concentration_threshold:
+            labels.append("Alta concentración")
+            severity = max(severity, 2)
+
+        if r["resultado_tecnico_usd"] < 0:
+            labels.append("Resultado negativo")
+            severity = max(severity, 3)
+
+        if pd.notna(r.get("loss_ratio_historico")) and r.get("loss_ratio_historico", np.nan) > 0:
+            if r["loss_ratio_campania"] > r["loss_ratio_historico"] * (1 + lr_tolerance):
+                labels.append("Loss Ratio > histórico")
+                severity = max(severity, 3)
+
+        if pd.notna(r.get("loss_cost_historico")) and r.get("loss_cost_historico", np.nan) > 0:
+            if r["loss_cost_campania"] > r["loss_cost_historico"] * (1 + lc_tolerance):
+                labels.append("Loss Cost > histórico")
+                severity = max(severity, 3)
+
+        if labels:
+            alert_rows.append({
+                "severidad": severity,
+                "alertas": " | ".join(labels),
+                "cosecha": r["cosecha"],
+                "cultivo": r["cultivo"],
+                "provincia": r["provincia"],
+                "departamento": r["departamento"],
+                "suma_asegurada_usd": r["suma_asegurada_usd"],
+                "prima_usd": r["prima_usd"],
+                "siniestros_totales_usd": r["siniestros_totales_usd"],
+                "resultado_tecnico_usd": r["resultado_tecnico_usd"],
+                "loss_ratio_campania": r["loss_ratio_campania"],
+                "loss_ratio_historico": r.get("loss_ratio_historico", np.nan),
+                "loss_cost_campania": r["loss_cost_campania"],
+                "loss_cost_historico": r.get("loss_cost_historico", np.nan),
+                "indice_loss_cost": r.get("indice_loss_cost", np.nan),
+                "participacion_suma": r["participacion_suma"],
+            })
+
+    if not alert_rows:
+        return pd.DataFrame()
+    return pd.DataFrame(alert_rows).sort_values(["severidad", "suma_asegurada_usd"], ascending=[False, False])
+
+
+def style_alerts(df: pd.DataFrame):
+    def row_style(row):
+        sev = row.get("severidad", 0)
+        if sev >= 3:
+            return ["background-color: #FEE2E2; color:#7F1D1D"] * len(row)
+        if sev == 2:
+            return ["background-color: #FEF3C7; color:#78350F"] * len(row)
+        return ["background-color: #DCFCE7; color:#14532D"] * len(row)
+
+    fmt = {
+        "suma_asegurada_usd": "USD {:,.0f}",
+        "prima_usd": "USD {:,.0f}",
+        "siniestros_totales_usd": "USD {:,.0f}",
+        "resultado_tecnico_usd": "USD {:,.0f}",
+        "loss_ratio_campania": "{:.1%}",
+        "loss_ratio_historico": "{:.1%}",
+        "loss_cost_campania": "{:.2%}",
+        "loss_cost_historico": "{:.2%}",
+        "indice_loss_cost": "{:.2f}",
+        "participacion_suma": "{:.1%}",
+    }
+    return df.style.apply(row_style, axis=1).format(fmt, na_rep="-")
 
 
 # -----------------------------
-# Data + filtros
+# Load
 # -----------------------------
-df_raw = load_data()
+add_css()
+df_base = load_campaign()
+
+st.title("🌾 Dashboard REA 25-26")
+st.caption("Reporte visual de campaña: cúmulos, resultado técnico, cultivos, cosecha y alertas de negocio.")
 
 with st.sidebar:
-    st.title("🌾 REA 25-26")
-    st.caption("Dashboard visual de campaña")
-    st.divider()
+    st.header("Filtros")
+    cosechas = st.multiselect("Cosecha", sorted(df_base["cosecha"].dropna().unique()), default=sorted(df_base["cosecha"].dropna().unique()))
+    provincias = st.multiselect("Provincia", sorted(df_base["provincia"].dropna().unique()), default=sorted(df_base["provincia"].dropna().unique()))
+    cultivos = st.multiselect("Cultivo", sorted(df_base["cultivo"].dropna().unique()), default=sorted(df_base["cultivo"].dropna().unique()))
 
-    cosecha_sel = st.multiselect(
-        "Cosecha",
-        options=sorted(df_raw["cosecha"].unique()),
-        default=sorted(df_raw["cosecha"].unique()),
-    )
-    provincia_sel = st.multiselect(
-        "Provincia",
-        options=sorted(df_raw["provincia"].unique()),
-        default=sorted(df_raw["provincia"].unique()),
-    )
-    cultivo_sel = st.multiselect(
-        "Cultivo",
-        options=sorted(df_raw["cultivo"].unique()),
-        default=sorted(df_raw["cultivo"].unique()),
-    )
-    cobertura_sel = st.multiselect(
-        "Cobertura",
-        options=sorted(df_raw["cobertura"].unique()),
-        default=sorted(df_raw["cobertura"].unique()),
+    st.divider()
+    st.subheader("Histórico / índice confianza")
+    try_github = st.checkbox("Intentar leer histórico desde GitHub", value=True)
+    uploaded_hist = st.file_uploader(
+        "O subir CSV histórico",
+        type=["csv"],
+        help="Puede ser pricing_vs_excel.csv del repo tarifador-ML o un archivo con loss_cost_historico/loss_ratio_historico.",
     )
 
     st.divider()
-    min_suma = float(df_raw["suma_asegurada_usd"].min())
-    max_suma = float(df_raw["suma_asegurada_usd"].max())
-    rango_suma = st.slider(
-        "Rango de suma asegurada por registro",
-        min_value=min_suma,
-        max_value=max_suma,
-        value=(min_suma, max_suma),
-        step=max((max_suma - min_suma) / 100, 1.0),
-        format="USD %.0f",
-    )
+    st.subheader("Umbrales de alertas")
+    concentration_threshold = st.slider("Alta concentración por fila", 0.01, 0.20, 0.05, 0.01)
+    lr_tolerance = st.slider("Tolerancia Loss Ratio vs histórico", 0.00, 1.00, 0.10, 0.05)
+    lc_tolerance = st.slider("Tolerancia Loss Cost vs histórico", 0.00, 1.00, 0.10, 0.05)
 
-    solo_siniestros = st.checkbox("Ver solo registros con siniestros", value=False)
-    top_n = st.slider("Top N para rankings", 5, 30, 12, 1)
+hist_content = uploaded_hist.getvalue() if uploaded_hist is not None else None
+hist = load_historical_from_csv(hist_content, try_github=try_github)
+df = add_historical(df_base, hist)
 
-
-df = df_raw[
-    df_raw["cosecha"].isin(cosecha_sel)
-    & df_raw["provincia"].isin(provincia_sel)
-    & df_raw["cultivo"].isin(cultivo_sel)
-    & df_raw["cobertura"].isin(cobertura_sel)
-    & df_raw["suma_asegurada_usd"].between(rango_suma[0], rango_suma[1])
+df_f = df[
+    df["cosecha"].isin(cosechas)
+    & df["provincia"].isin(provincias)
+    & df["cultivo"].isin(cultivos)
 ].copy()
-if solo_siniestros:
-    df = df[df["siniestro_flag"]]
 
-if df.empty:
+if df_f.empty:
     st.warning("No hay datos para los filtros seleccionados.")
     st.stop()
 
-k = kpis(df)
+# -----------------------------
+# Executive KPIs
+# -----------------------------
+prima = df_f["prima_usd"].sum()
+siniestros = df_f["siniestros_totales_usd"].sum()
+suma = df_f["suma_asegurada_usd"].sum()
+resultado = prima - siniestros
+loss_ratio = siniestros / prima if prima else np.nan
+loss_cost = siniestros / suma if suma else np.nan
+hectareas = df_f["hectareas"].sum()
 
-# -----------------------------
-# Header
-# -----------------------------
-st.title("Dashboard de negocio | Campaña REA 25-26")
-st.caption(
-    "Informes visuales para analizar cúmulos por zonas, resultado por cosecha, cultivos y focos críticos de siniestralidad."
+st.markdown(
+    """
+    <div class="section-note">
+    <b>Base actualizada:</b> la siniestralidad se calcula como <b>K + L + M</b>:
+    ST Pagado + RSP + HYG. Esto recalcula Loss Ratio, Loss Cost, resultado técnico y alertas.
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.markdown(f"<div class='insight-box'>{business_commentary(k)}</div>", unsafe_allow_html=True)
+kpi_cols = st.columns(6)
+with kpi_cols[0]:
+    metric_card("Suma asegurada", fmt_money(suma), f"{len(df_f):,} registros")
+with kpi_cols[1]:
+    metric_card("Prima", fmt_money(prima), f"Tasa prima {fmt_pct(prima / suma if suma else np.nan, 2)}")
+with kpi_cols[2]:
+    metric_card("Siniestros K+L+M", fmt_money(siniestros), f"ST + RSP + HYG")
+with kpi_cols[3]:
+    metric_card("Resultado técnico", fmt_money(resultado), "Prima - siniestros")
+with kpi_cols[4]:
+    metric_card("Loss Ratio", fmt_pct(loss_ratio), "Siniestros / Prima")
+with kpi_cols[5]:
+    metric_card("Loss Cost", fmt_pct(loss_cost, 2), "Siniestros / Suma asegurada")
 
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1:
-    metric_card("Suma asegurada", fmt_usd(k["suma_asegurada_usd"]), f"{fmt_num(k['has'])} ha")
-with c2:
-    metric_card("Prima", fmt_usd(k["prima_usd"]), f"Tasa {fmt_pct(k['tasa_prima'])}")
-with c3:
-    metric_card("Siniestros", fmt_usd(k["siniestros_total_usd"]), f"Loss Cost {fmt_pct(k['loss_cost'])}")
-with c4:
-    metric_card("Resultado técnico", fmt_usd(k["resultado_tecnico_usd"]), "Prima - siniestros")
-with c5:
-    metric_card("Loss Ratio", fmt_pct(k["loss_ratio"]), f"{int(k['registros'])} registros")
-
-# -----------------------------
-# Tabs
-# -----------------------------
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    [
-        "Resumen ejecutivo",
-        "Cúmulos por zona",
-        "Resultado por cosecha",
-        "Cultivos",
-        "Matriz zona-cultivo",
-        "Alertas y detalle",
-    ]
+st.markdown(
+    f"""
+    <span class="badge badge-blue">Hectáreas: {hectareas:,.0f}</span>
+    <span class="badge badge-green">Cultivos: {df_f["cultivo"].nunique()}</span>
+    <span class="badge badge-green">Departamentos: {df_f["departamento"].nunique()}</span>
+    <span class="badge badge-yellow">Histórico cruzado: {df_f["tiene_historico"].mean():.0%}</span>
+    """,
+    unsafe_allow_html=True,
 )
 
-with tab0:
-    st.markdown("<div class='section-title'>Composición general de la cartera</div>", unsafe_allow_html=True)
-    col_a, col_b = st.columns([1.15, 0.85])
+tabs = st.tabs([
+    "Resumen",
+    "Cúmulos por zona",
+    "Resultado por cosecha",
+    "Cultivos",
+    "Matriz zona-cultivo",
+    "Alertas",
+    "Datos",
+])
 
-    with col_a:
-        prov = aggregate(df, ["provincia"]).head(top_n)
+# -----------------------------
+# Resumen
+# -----------------------------
+with tabs[0]:
+    c1, c2 = st.columns([1.2, 1])
+    prov_agg = aggregate(df_f, ["provincia"]).sort_values("suma_asegurada_usd", ascending=False)
+    cult_agg = aggregate(df_f, ["cultivo"]).sort_values("suma_asegurada_usd", ascending=False)
+
+    with c1:
         fig = px.bar(
-            prov.sort_values("suma_asegurada_usd"),
-            x="suma_asegurada_usd",
-            y="provincia",
-            orientation="h",
-            text="suma_asegurada_usd",
-            title="Suma asegurada por provincia",
-            labels={"suma_asegurada_usd": "Suma asegurada", "provincia": "Provincia"},
+            prov_agg,
+            x="provincia",
+            y="suma_asegurada_usd",
+            text_auto=".2s",
+            title="Cúmulo de suma asegurada por provincia",
+            labels={"suma_asegurada_usd": "Suma asegurada USD", "provincia": "Provincia"},
         )
-        fig.update_traces(texttemplate="%{text:$,.0f}", textposition="outside", cliponaxis=False)
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
+        fig.update_layout(height=420, xaxis_tickangle=-30)
+        st.plotly_chart(fig, use_container_width=True)
 
-    with col_b:
-        pie = aggregate(df, ["cultivo"])
+    with c2:
         fig = px.pie(
-            pie,
+            cult_agg,
             names="cultivo",
-            values="suma_asegurada_usd",
-            title="Participación por cultivo",
-            hole=0.48,
+            values="prima_usd",
+            title="Distribución de prima por cultivo",
+            hole=0.45,
         )
-        fig.update_layout(height=430, margin=dict(l=10, r=10, t=45, b=10))
+        fig.update_layout(height=420)
         st.plotly_chart(fig, use_container_width=True)
 
-    col_c, col_d = st.columns(2)
-    with col_c:
-        sem = aggregate(df, ["cluster_negocio"])
-        fig = px.bar(
-            sem.sort_values("prima_usd"),
-            x="prima_usd",
-            y="cluster_negocio",
-            orientation="h",
-            title="Prima por cluster de negocio",
-            labels={"prima_usd": "Prima", "cluster_negocio": "Cluster"},
-        )
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-    with col_d:
-        cov = aggregate(df, ["cobertura"])
-        fig = px.bar(
-            cov,
-            x="cobertura",
-            y=["prima_usd", "siniestros_total_usd"],
-            barmode="group",
-            title="Prima vs siniestros por cobertura",
-            labels={"value": "USD", "cobertura": "Cobertura", "variable": "Indicador"},
-        )
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-
-with tab1:
-    st.markdown("<div class='section-title'>Cúmulos de exposición por zona</div>", unsafe_allow_html=True)
-    dim_zona = st.radio(
-        "Nivel de análisis",
-        options=["provincia", "departamento", "provincia + departamento"],
-        horizontal=True,
+    st.subheader("Lectura rápida")
+    worst_lr = aggregate(df_f, ["provincia", "departamento"]).sort_values("loss_ratio_campania", ascending=False).head(5)
+    st.dataframe(
+        worst_lr[["provincia", "departamento", "prima_usd", "siniestros_totales_usd", "loss_ratio_campania", "loss_cost_campania"]].style.format({
+            "prima_usd": "USD {:,.0f}",
+            "siniestros_totales_usd": "USD {:,.0f}",
+            "loss_ratio_campania": "{:.1%}",
+            "loss_cost_campania": "{:.2%}",
+        }),
+        use_container_width=True,
+        hide_index=True,
     )
-    if dim_zona == "provincia":
-        zona = aggregate(df, ["provincia"])
-        zona["zona"] = zona["provincia"]
-    elif dim_zona == "departamento":
-        zona = aggregate(df, ["departamento"])
-        zona["zona"] = zona["departamento"]
+
+# -----------------------------
+# Cúmulos
+# -----------------------------
+with tabs[1]:
+    st.subheader("Cúmulos por provincia y departamento")
+    nivel = st.radio("Nivel de análisis", ["Provincia", "Departamento"], horizontal=True)
+    if nivel == "Provincia":
+        zone = aggregate(df_f, ["provincia"]).sort_values("suma_asegurada_usd", ascending=False)
+        x_col = "provincia"
     else:
-        zona = aggregate(df, ["provincia", "departamento"])
-        zona["zona"] = zona["provincia"] + " | " + zona["departamento"]
+        zone = aggregate(df_f, ["provincia", "departamento"]).sort_values("suma_asegurada_usd", ascending=False).head(30)
+        zone["zona"] = zone["provincia"] + " - " + zone["departamento"]
+        x_col = "zona"
 
-    zona_top = zona.sort_values("suma_asegurada_usd", ascending=False).head(top_n).copy()
-
-    col_a, col_b = st.columns([1.1, 0.9])
-    with col_a:
-        fig = px.bar(
-            zona_top.sort_values("suma_asegurada_usd"),
-            x="suma_asegurada_usd",
-            y="zona",
-            orientation="h",
-            title=f"Top {top_n} zonas por suma asegurada",
-            color="loss_ratio",
-            color_continuous_scale="RdYlGn_r",
-            labels={"suma_asegurada_usd": "Suma asegurada", "zona": "Zona", "loss_ratio": "Loss Ratio"},
-        )
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-
-    with col_b:
-        pareto = zona.sort_values("suma_asegurada_usd", ascending=False).head(top_n).copy()
-        fig = go.Figure()
-        fig.add_bar(x=pareto["zona"], y=pareto["suma_asegurada_usd"], name="Suma asegurada")
-        fig.add_scatter(
-            x=pareto["zona"],
-            y=pareto["cum_share_suma"],
-            name="Share acumulado",
-            yaxis="y2",
-            mode="lines+markers",
-        )
-        fig.update_layout(
-            title="Pareto de concentración",
-            yaxis=dict(title="USD"),
-            yaxis2=dict(title="Share acumulado", overlaying="y", side="right", tickformat=".0%", range=[0, 1.05]),
-            xaxis_tickangle=-35,
-            height=430,
-            margin=dict(l=10, r=10, t=45, b=90),
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-            legend_title_text="",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.dataframe(
-        style_table(zona_top),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "suma_asegurada_usd": st.column_config.NumberColumn("Suma asegurada", format="USD %.0f"),
-            "prima_usd": st.column_config.NumberColumn("Prima", format="USD %.0f"),
-            "siniestros_total_usd": st.column_config.NumberColumn("Siniestros", format="USD %.0f"),
-            "resultado_tecnico_usd": st.column_config.NumberColumn("Resultado", format="USD %.0f"),
-            "loss_ratio": st.column_config.NumberColumn("Loss Ratio", format="%.1%"),
-            "loss_cost": st.column_config.NumberColumn("Loss Cost", format="%.2%"),
-            "share_suma": st.column_config.NumberColumn("Share suma", format="%.1%"),
-        },
+    fig = px.bar(
+        zone,
+        x=x_col,
+        y="suma_asegurada_usd",
+        color="loss_ratio_campania",
+        text_auto=".2s",
+        title=f"Top cúmulos por {nivel.lower()}",
+        labels={"suma_asegurada_usd": "Suma asegurada USD", "loss_ratio_campania": "Loss Ratio"},
+        color_continuous_scale="RdYlGn_r",
     )
-
-with tab2:
-    st.markdown("<div class='section-title'>Resultado técnico por cosecha</div>", unsafe_allow_html=True)
-    cosecha = aggregate(df, ["cosecha"]).sort_values("cosecha")
-
-    col_a, col_b = st.columns([1, 1])
-    with col_a:
-        fig = px.bar(
-            cosecha,
-            x="cosecha",
-            y=["prima_usd", "siniestros_total_usd", "resultado_tecnico_usd"],
-            barmode="group",
-            title="Prima, siniestros y resultado por cosecha",
-            labels={"value": "USD", "cosecha": "Cosecha", "variable": "Indicador"},
-        )
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-    with col_b:
-        fig = px.line(
-            cosecha,
-            x="cosecha",
-            y=["loss_ratio", "loss_cost", "tasa_prima"],
-            markers=True,
-            title="Indicadores técnicos por cosecha",
-            labels={"value": "Ratio", "cosecha": "Cosecha", "variable": "Indicador"},
-        )
-        fig.update_yaxes(tickformat=".1%")
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-
-    st.dataframe(
-        style_table(cosecha),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "hectareas": st.column_config.NumberColumn("Hectáreas", format="%.0f"),
-            "suma_asegurada_usd": st.column_config.NumberColumn("Suma asegurada", format="USD %.0f"),
-            "prima_usd": st.column_config.NumberColumn("Prima", format="USD %.0f"),
-            "siniestros_total_usd": st.column_config.NumberColumn("Siniestros", format="USD %.0f"),
-            "resultado_tecnico_usd": st.column_config.NumberColumn("Resultado", format="USD %.0f"),
-            "loss_ratio": st.column_config.NumberColumn("Loss Ratio", format="%.1%"),
-            "loss_cost": st.column_config.NumberColumn("Loss Cost", format="%.2%"),
-            "tasa_prima": st.column_config.NumberColumn("Tasa prima", format="%.2%"),
-        },
-    )
-
-with tab3:
-    st.markdown("<div class='section-title'>Lectura por cultivo</div>", unsafe_allow_html=True)
-    cult = aggregate(df, ["cultivo"]).sort_values("suma_asegurada_usd", ascending=False)
-
-    col_a, col_b = st.columns([1.1, 0.9])
-    with col_a:
-        metric_for_chart = st.selectbox(
-            "Métrica para ranking de cultivos",
-            options=["suma_asegurada_usd", "prima_usd", "siniestros_total_usd", "resultado_tecnico_usd", "hectareas"],
-            format_func=chart_metric_label,
-        )
-        fig = px.bar(
-            cult.head(top_n).sort_values(metric_for_chart),
-            x=metric_for_chart,
-            y="cultivo",
-            orientation="h",
-            title=f"Top cultivos por {chart_metric_label(metric_for_chart)}",
-            color="loss_ratio",
-            color_continuous_scale="RdYlGn_r",
-            labels={metric_for_chart: chart_metric_label(metric_for_chart), "cultivo": "Cultivo", "loss_ratio": "Loss Ratio"},
-        )
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-
-    with col_b:
-        fig = px.scatter(
-            cult,
-            x="tasa_prima",
-            y="loss_cost",
-            size="suma_asegurada_usd",
-            color="loss_ratio",
-            hover_name="cultivo",
-            color_continuous_scale="RdYlGn_r",
-            title="Tasa vs Loss Cost por cultivo",
-            labels={"tasa_prima": "Tasa prima", "loss_cost": "Loss Cost", "loss_ratio": "Loss Ratio"},
-        )
-        fig.update_xaxes(tickformat=".1%")
-        fig.update_yaxes(tickformat=".1%")
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-
-    st.dataframe(
-        style_table(cult),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "hectareas": st.column_config.NumberColumn("Hectáreas", format="%.0f"),
-            "suma_asegurada_usd": st.column_config.NumberColumn("Suma asegurada", format="USD %.0f"),
-            "prima_usd": st.column_config.NumberColumn("Prima", format="USD %.0f"),
-            "siniestros_total_usd": st.column_config.NumberColumn("Siniestros", format="USD %.0f"),
-            "resultado_tecnico_usd": st.column_config.NumberColumn("Resultado", format="USD %.0f"),
-            "loss_ratio": st.column_config.NumberColumn("Loss Ratio", format="%.1%"),
-            "loss_cost": st.column_config.NumberColumn("Loss Cost", format="%.2%"),
-            "tasa_prima": st.column_config.NumberColumn("Tasa prima", format="%.2%"),
-        },
-    )
-
-with tab4:
-    st.markdown("<div class='section-title'>Matriz zona-cultivo</div>", unsafe_allow_html=True)
-    col_f1, col_f2 = st.columns([0.5, 0.5])
-    with col_f1:
-        zona_dim = st.selectbox("Dimensión zona", ["provincia", "departamento"], index=0)
-    with col_f2:
-        heat_metric = st.selectbox(
-            "Métrica del color",
-            ["suma_asegurada_usd", "prima_usd", "siniestros_total_usd", "resultado_tecnico_usd", "loss_ratio", "loss_cost", "tasa_prima"],
-            index=4,
-            format_func=chart_metric_label,
-        )
-
-    mat = aggregate(df, [zona_dim, "cultivo"])
-    if heat_metric in ["loss_ratio", "loss_cost", "tasa_prima"]:
-        values = mat.pivot(index=zona_dim, columns="cultivo", values=heat_metric).fillna(0)
-    else:
-        values = mat.pivot(index=zona_dim, columns="cultivo", values=heat_metric).fillna(0)
-
-    # Ordena por exposición total de la zona para que la matriz tenga lectura de negocio.
-    order_zones = aggregate(df, [zona_dim]).sort_values("suma_asegurada_usd", ascending=False)[zona_dim].tolist()
-    values = values.reindex([z for z in order_zones if z in values.index])
-    if len(values) > 25:
-        values = values.head(25)
-
-    fig = px.imshow(
-        values,
-        aspect="auto",
-        text_auto=False,
-        color_continuous_scale="RdYlGn_r" if heat_metric in ["loss_ratio", "loss_cost"] else "Blues",
-        title=f"Heatmap {chart_metric_label(heat_metric)} por {zona_dim} y cultivo",
-        labels=dict(x="Cultivo", y=zona_dim.title(), color=chart_metric_label(heat_metric)),
-    )
-    if heat_metric in ["loss_ratio", "loss_cost", "tasa_prima"]:
-        fig.update_coloraxes(colorbar_tickformat=".1%")
-    fig.update_layout(height=max(460, 24 * len(values)), margin=dict(l=10, r=10, t=45, b=10))
+    fig.update_layout(height=520, xaxis_tickangle=-45)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.caption("Tip: usar Loss Ratio para detectar zonas/cultivos con peor resultado; usar suma asegurada para detectar cúmulos de exposición.")
-
-with tab5:
-    st.markdown("<div class='section-title'>Alertas de negocio y detalle descargable</div>", unsafe_allow_html=True)
-
-    base_alertas = aggregate(df, ["provincia", "departamento", "cultivo", "cosecha"])
-    # Score simple: prioriza alta exposición, LR alto y resultado negativo.
-    base_alertas["score_alerta"] = (
-        base_alertas["share_suma"].rank(pct=True).fillna(0) * 0.35
-        + base_alertas["loss_ratio"].clip(0, 3).rank(pct=True).fillna(0) * 0.35
-        + (base_alertas["resultado_tecnico_usd"] < 0).astype(float) * 0.30
+    st.dataframe(
+        zone.style.format({
+            "hectareas": "{:,.0f}",
+            "suma_asegurada_usd": "USD {:,.0f}",
+            "prima_usd": "USD {:,.0f}",
+            "siniestros_totales_usd": "USD {:,.0f}",
+            "resultado_tecnico_usd": "USD {:,.0f}",
+            "loss_ratio_campania": "{:.1%}",
+            "loss_cost_campania": "{:.2%}",
+            "participacion_suma": "{:.1%}",
+            "participacion_prima": "{:.1%}",
+        }),
+        use_container_width=True,
+        hide_index=True,
     )
-    base_alertas["motivo_alerta"] = np.select(
-        [
-            (base_alertas["resultado_tecnico_usd"] < 0) & (base_alertas["loss_ratio"] >= 1),
-            (base_alertas["loss_ratio"] >= 0.8),
-            (base_alertas["share_suma"] >= 0.05),
-            (base_alertas["siniestros_total_usd"] > 0),
-        ],
-        [
-            "Resultado negativo",
-            "Loss Ratio elevado",
-            "Alta concentración",
-            "Con siniestros",
-        ],
-        default="Seguimiento",
-    )
-    alertas = base_alertas.sort_values("score_alerta", ascending=False).head(max(top_n, 10))
 
-    col_a, col_b = st.columns([1, 1])
-    with col_a:
-        fig = px.bar(
-            alertas.sort_values("score_alerta"),
-            x="score_alerta",
-            y=alertas["provincia"] + " | " + alertas["departamento"] + " | " + alertas["cultivo"],
-            orientation="h",
-            color="motivo_alerta",
-            title="Ranking de focos a revisar",
-            labels={"score_alerta": "Score alerta", "y": "Zona / cultivo"},
+# -----------------------------
+# Cosecha
+# -----------------------------
+with tabs[2]:
+    st.subheader("Resultado por cosecha")
+    cosecha_agg = aggregate(df_f, ["cosecha"]).sort_values("prima_usd", ascending=False)
+    c1, c2 = st.columns(2)
+    with c1:
+        long = cosecha_agg.melt(
+            id_vars="cosecha",
+            value_vars=["prima_usd", "siniestros_totales_usd"],
+            var_name="métrica",
+            value_name="usd",
         )
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
-    with col_b:
-        fig = px.scatter(
-            base_alertas,
-            x="suma_asegurada_usd",
-            y="loss_ratio",
-            size="prima_usd",
-            color="resultado_tecnico_usd",
-            hover_name="departamento",
-            hover_data=["provincia", "cultivo", "cosecha", "prima_usd", "siniestros_total_usd"],
-            color_continuous_scale="RdYlGn",
-            title="Exposición vs Loss Ratio",
-            labels={"suma_asegurada_usd": "Suma asegurada", "loss_ratio": "Loss Ratio"},
+        fig = px.bar(
+            long,
+            x="cosecha",
+            y="usd",
+            color="métrica",
+            barmode="group",
+            title="Prima vs siniestros por cosecha",
+            text_auto=".2s",
+        )
+        fig.update_layout(height=430)
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig = px.bar(
+            cosecha_agg,
+            x="cosecha",
+            y="loss_ratio_campania",
+            color="loss_ratio_campania",
+            title="Loss Ratio por cosecha",
+            text_auto=".1%",
+            color_continuous_scale="RdYlGn_r",
         )
         fig.update_yaxes(tickformat=".0%")
-        st.plotly_chart(add_bar_labels(fig), use_container_width=True)
+        fig.update_layout(height=430)
+        st.plotly_chart(fig, use_container_width=True)
 
     st.dataframe(
-        style_table(alertas),
+        cosecha_agg.style.format({
+            "hectareas": "{:,.0f}",
+            "suma_asegurada_usd": "USD {:,.0f}",
+            "prima_usd": "USD {:,.0f}",
+            "siniestros_totales_usd": "USD {:,.0f}",
+            "resultado_tecnico_usd": "USD {:,.0f}",
+            "loss_ratio_campania": "{:.1%}",
+            "loss_cost_campania": "{:.2%}",
+            "tasa_prima": "{:.2%}",
+        }),
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "suma_asegurada_usd": st.column_config.NumberColumn("Suma asegurada", format="USD %.0f"),
-            "prima_usd": st.column_config.NumberColumn("Prima", format="USD %.0f"),
-            "siniestros_total_usd": st.column_config.NumberColumn("Siniestros", format="USD %.0f"),
-            "resultado_tecnico_usd": st.column_config.NumberColumn("Resultado", format="USD %.0f"),
-            "loss_ratio": st.column_config.NumberColumn("Loss Ratio", format="%.1%"),
-            "loss_cost": st.column_config.NumberColumn("Loss Cost", format="%.2%"),
-            "share_suma": st.column_config.NumberColumn("Share suma", format="%.1%"),
-            "score_alerta": st.column_config.ProgressColumn("Score alerta", format="%.2f", min_value=0, max_value=1),
+    )
+
+# -----------------------------
+# Cultivos
+# -----------------------------
+with tabs[3]:
+    st.subheader("Performance por cultivo")
+    cult = aggregate(df_f, ["cultivo"]).sort_values("suma_asegurada_usd", ascending=False)
+    fig = px.scatter(
+        cult,
+        x="suma_asegurada_usd",
+        y="loss_ratio_campania",
+        size="prima_usd",
+        color="resultado_tecnico_usd",
+        hover_name="cultivo",
+        title="Mapa de cultivos: exposición, prima, Loss Ratio y resultado",
+        labels={
+            "suma_asegurada_usd": "Suma asegurada USD",
+            "loss_ratio_campania": "Loss Ratio",
+            "prima_usd": "Prima USD",
+            "resultado_tecnico_usd": "Resultado técnico USD",
         },
+        color_continuous_scale="RdYlGn",
     )
+    fig.update_yaxes(tickformat=".0%")
+    fig.update_layout(height=520)
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.download_button(
-        "Descargar alertas filtradas CSV",
-        data=alertas.to_csv(index=False).encode("utf-8"),
-        file_name="alertas_negocio_rea_25_26.csv",
-        mime="text/csv",
-    )
-
-    st.markdown("<div class='section-title'>Base filtrada</div>", unsafe_allow_html=True)
     st.dataframe(
-        df.sort_values("suma_asegurada_usd", ascending=False),
+        cult.sort_values("loss_ratio_campania", ascending=False).style.format({
+            "hectareas": "{:,.0f}",
+            "suma_asegurada_usd": "USD {:,.0f}",
+            "prima_usd": "USD {:,.0f}",
+            "siniestros_totales_usd": "USD {:,.0f}",
+            "resultado_tecnico_usd": "USD {:,.0f}",
+            "loss_ratio_campania": "{:.1%}",
+            "loss_cost_campania": "{:.2%}",
+            "participacion_suma": "{:.1%}",
+        }),
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "suma_asegurada_usd": st.column_config.NumberColumn("Suma asegurada", format="USD %.0f"),
-            "prima_usd": st.column_config.NumberColumn("Prima", format="USD %.0f"),
-            "siniestros_total_usd": st.column_config.NumberColumn("Siniestros", format="USD %.0f"),
-            "resultado_tecnico_usd": st.column_config.NumberColumn("Resultado", format="USD %.0f"),
-            "loss_ratio_pct": st.column_config.NumberColumn("Loss Ratio", format="%.1%"),
-            "loss_cost_campania_pct": st.column_config.NumberColumn("Loss Cost", format="%.2%"),
-        },
     )
+
+# -----------------------------
+# Matriz zona-cultivo
+# -----------------------------
+with tabs[4]:
+    st.subheader("Matriz zona-cultivo")
+    metric = st.selectbox(
+        "Métrica para colorear",
+        ["loss_ratio_campania", "loss_cost_campania", "suma_asegurada_usd", "resultado_tecnico_usd", "prima_usd"],
+        index=0,
+    )
+    zona_metric = aggregate(df_f, ["provincia", "cultivo"])
+    pivot = zona_metric.pivot_table(index="provincia", columns="cultivo", values=metric, aggfunc="sum")
+    if metric in ["loss_ratio_campania", "loss_cost_campania"]:
+        # Para ratios, recomputar correctamente a partir de agregados.
+        if metric == "loss_ratio_campania":
+            pivot = zona_metric.pivot(index="provincia", columns="cultivo", values="loss_ratio_campania")
+        else:
+            pivot = zona_metric.pivot(index="provincia", columns="cultivo", values="loss_cost_campania")
+
+    fig = px.imshow(
+        pivot,
+        text_auto=".1%" if metric in ["loss_ratio_campania", "loss_cost_campania"] else ".2s",
+        aspect="auto",
+        color_continuous_scale="RdYlGn_r" if metric in ["loss_ratio_campania", "loss_cost_campania"] else "Blues",
+        title=f"Heatmap provincia x cultivo - {metric}",
+    )
+    fig.update_layout(height=520)
+    st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------
+# Alertas
+# -----------------------------
+with tabs[5]:
+    st.subheader("Alertas de negocio")
+    alerts = build_alerts(df_f, concentration_threshold, lr_tolerance, lc_tolerance)
+
+    if alerts.empty:
+        st.success("No se detectaron alertas bajo los umbrales actuales.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Alertas", len(alerts))
+        with c2:
+            st.metric("Resultado negativo", int(alerts["alertas"].str.contains("Resultado negativo").sum()))
+        with c3:
+            st.metric("Alta concentración", int(alerts["alertas"].str.contains("Alta concentración").sum()))
+
+        st.dataframe(
+            style_alerts(alerts),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        csv_alerts = alerts.to_csv(index=False).encode("utf-8")
+        st.download_button("Descargar alertas CSV", csv_alerts, "alertas_rea_25_26.csv", "text/csv")
+
+    st.info(
+        "Las alertas comparativas contra histórico se activan si se logra cruzar contra pricing_vs_excel.csv "
+        "u otro CSV histórico por cultivo + provincia + departamento."
+    )
+
+# -----------------------------
+# Datos
+# -----------------------------
+with tabs[6]:
+    st.subheader("Base filtrada")
+    st.dataframe(
+        df_f.style.format({
+            "hectareas": "{:,.0f}",
+            "suma_asegurada_usd": "USD {:,.0f}",
+            "prima_usd": "USD {:,.0f}",
+            "st_pagado_usd": "USD {:,.0f}",
+            "rsp_usd": "USD {:,.0f}",
+            "hyg_usd": "USD {:,.0f}",
+            "siniestros_totales_usd": "USD {:,.0f}",
+            "resultado_tecnico_usd": "USD {:,.0f}",
+            "loss_ratio_campania": "{:.1%}",
+            "loss_cost_campania": "{:.2%}",
+            "loss_ratio_historico": "{:.1%}",
+            "loss_cost_historico": "{:.2%}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
     st.download_button(
         "Descargar base filtrada CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name="base_filtrada_rea_25_26.csv",
-        mime="text/csv",
+        df_f.to_csv(index=False).encode("utf-8"),
+        "rea_25_26_base_filtrada.csv",
+        "text/csv",
     )

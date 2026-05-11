@@ -1,59 +1,78 @@
-# Dashboard de negocio REA 25-26
+# Dashboard REA 25-26 actualizado
 
-Dashboard Streamlit para analizar visualmente la campaña REA 25-26.
+Dashboard Streamlit para analizar la campaña REA 25-26 con foco en:
 
-## Objetivo
+- cúmulos por zona, provincia y departamento,
+- resultado por cosecha,
+- performance por cultivo,
+- matriz zona-cultivo,
+- alertas de negocio por concentración, resultado negativo y comparación contra histórico.
 
-Transformar la base de campaña en un reporte visual de gestión que permita analizar:
+## Cambio incorporado
 
-- cúmulos de exposición por provincia/departamento;
-- resultado técnico por cosecha;
-- performance por cultivo;
-- matriz zona-cultivo;
-- alertas de negocio por concentración, siniestralidad y resultado negativo.
+La siniestralidad se recalcula como la suma de las columnas **K + L + M** de la solapa `25-26`:
 
-## Estructura
+- K: `ST PAGADO 100%- USD`
+- L: `RSP 100%- USD`
+- M: `HYG 100%- USD`
 
-```text
-rea_25_26_dashboard_negocio/
-├── app.py
-├── requirements.txt
-├── README.md
-├── run_dashboard_windows.bat
-└── data/
-    └── rea_25_26_dashboard_ready.csv
-```
+Validación sobre el archivo reenviado:
 
-## Cómo correrlo
+- Registros válidos: 210
+- Suma asegurada: USD 64,906,579
+- Prima: USD 2,132,683
+- ST pagado: USD 694,339
+- RSP: USD 42,074
+- HYG: USD 66,896
+- **Siniestros totales K+L+M: USD 803,309**
+- Resultado técnico: USD 1,329,373
+- Loss Ratio: 37.7%
+- Loss Cost: 1.24%
 
-Desde una terminal:
+## Cómo correr
 
 ```bash
-cd rea_25_26_dashboard_negocio
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-En Windows también podés ejecutar:
+En Windows:
 
 ```bash
 run_dashboard_windows.bat
 ```
 
-## Indicadores principales
+## Cruce con histórico
 
-El dashboard recalcula dinámicamente según filtros:
+El dashboard puede intentar leer automáticamente:
 
-- suma asegurada;
-- hectáreas;
-- prima;
-- siniestros totales;
-- resultado técnico;
-- tasa de prima;
-- Loss Cost campaña;
-- Loss Ratio;
-- participación de cúmulos sobre el total.
+```text
+https://raw.githubusercontent.com/salva67/tarifador-ML/main/data/raw/pricing_vs_excel.csv
+```
 
-## Notas
+También se puede subir un CSV histórico desde el sidebar.
 
-Esta versión está enfocada en el objetivo inicial de negocio: lectura visual de la campaña. El cruce con tarifador, Loss Cost histórico e índices de confianza puede integrarse como segunda etapa.
+Columnas sugeridas para histórico:
+
+- `CULTIVO`
+- `PROVINCIA`
+- `DEPTO`
+- `loss_cost_hist`
+- `premium_hist_usd`
+- `claims_hist_usd`
+
+Con eso el dashboard calcula:
+
+- Loss Ratio campaña vs histórico
+- Loss Cost campaña vs histórico
+- Índice Loss Cost campaña / histórico
+- Alertas por desvío
+
+## Cómo actualizar con otro Excel
+
+Reemplazá el archivo en `data/raw/` y corré:
+
+```bash
+python preparar_base_desde_excel.py --input "data/raw/NOMBRE_DEL_ARCHIVO.xlsx"
+streamlit run app.py
+```
